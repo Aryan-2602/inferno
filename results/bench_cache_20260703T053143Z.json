@@ -1,0 +1,20 @@
+{
+  "baseline": {
+    "tokens_per_second": 12.731540227206471,
+    "peak_memory_mb": 2012.515625,
+    "perplexity": 4.960186958312988,
+    "compression": 1.0
+  },
+  "int8_quantized": {
+    "tokens_per_second": 11.681405427881785,
+    "peak_memory_mb": 2066.0625,
+    "perplexity": 7.052267074584961,
+    "compression": 4.0
+  },
+  "deltas": {
+    "tokens_per_second": -1.0501347993246863,
+    "peak_memory_mb": 53.546875,
+    "perplexity": 2.0920801162719727,
+    "compression": 3.0
+  }
+}

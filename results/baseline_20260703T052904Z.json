@@ -1,0 +1,13 @@
+{
+  "model_id": "Qwen/Qwen2.5-0.5B-Instruct",
+  "num_prompts": 1,
+  "max_new_tokens": 4,
+  "batch_size": 1,
+  "ttft_seconds": 0.07377041701693088,
+  "total_time_seconds": 0.4596207920694724,
+  "tokens_per_second": 8.702826480041821,
+  "peak_memory_mb": 1981.546875,
+  "generated_texts": [
+    "\n\nI am trying"
+  ]
+}
