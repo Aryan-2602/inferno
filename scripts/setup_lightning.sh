@@ -1,6 +1,6 @@
 #!/bin/bash
 # Run this first thing inside Lightning Studio
-git clone https://github.com/YOUR_USERNAME/inferno.git
+git clone https://github.com/Aryan2602/inferno.git
 cd inferno
 python -m venv .venv
 source .venv/bin/activate
