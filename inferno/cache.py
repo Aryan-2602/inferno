@@ -63,6 +63,13 @@ def quantize_int8(tensor: torch.Tensor) -> QuantizedTensor:
     # then clamp to keep strictly within signed int8 range we use
     quantized = (tensor_fp32 / scale).round().clamp(-INT8_MAX, INT8_MAX).to(torch.int8)
 
+    # GPU-NOTE: .to(torch.int8) preserves device; assert here catches any future
+    # refactor that accidentally inserts a .cpu() call in the quantization path.
+    assert quantized.device == tensor.device, (
+        f"quantize_int8: device mismatch — input on {tensor.device}, "
+        f"quantized on {quantized.device}"
+    )
+
     # TRADEOFF: per-tensor scale is memory-cheap (one float per tensor) but
     # sacrifices accuracy vs per-channel or per-token scales because a single
     # outlier in any channel forces a coarse scale for the whole tensor.
@@ -137,6 +144,17 @@ def quantize_int8_per_channel(
 
     # MATH: q = round(x / scale).clamp(-127, 127) — per-channel division then rounding
     quantized = (tensor_fp32 / scales).round().clamp(-INT8_MAX, INT8_MAX).to(torch.int8)
+
+    # GPU-NOTE: scales is derived from tensor_fp32 (same device); quantized from scales.
+    # Assert both stayed on the original device — catches accidental .cpu() in the path.
+    assert quantized.device == tensor.device, (
+        f"quantize_int8_per_channel: quantized on {quantized.device}, "
+        f"expected {tensor.device}"
+    )
+    assert scales.device == tensor.device, (
+        f"quantize_int8_per_channel: scales on {scales.device}, "
+        f"expected {tensor.device}"
+    )
 
     # TRADEOFF: per-channel scales cost more memory than per-tensor (one float per
     # head vs one float total), but the overhead is negligible — 32 heads × 2 floats

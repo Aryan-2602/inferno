@@ -68,11 +68,16 @@ def load_model(
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    # Left-padding is correct for decoder-only models: padding tokens appear before
+    # the prompt so the model's last position attends only to real content, not to
+    # padding. Right-padding (the tokenizer default) produces incorrect generation
+    # for all sequences shorter than the longest in a batch.
+    tokenizer.padding_side = "left"
 
     dtype = torch.float32 if device.type == "cpu" else torch.bfloat16
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
-        torch_dtype=dtype,
+        dtype=dtype,
         trust_remote_code=True,
     ).to(device)
     model.eval()
