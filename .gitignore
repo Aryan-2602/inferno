@@ -1,7 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Distribution / packaging
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
 .venv/
 venv/
 ENV/
-__pycache__/
-*.pyc
+
+# Pytest
+.pytest_cache/
+
+# OS
 .DS_Store
 
