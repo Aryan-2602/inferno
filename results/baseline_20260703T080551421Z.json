@@ -1,0 +1,14 @@
+{
+  "model_id": "Qwen/Qwen2.5-0.5B-Instruct",
+  "num_prompts": 2,
+  "max_new_tokens": 8,
+  "batch_size": 1,
+  "ttft_seconds": 0.7254300829954445,
+  "total_time_seconds": 1.875125166028738,
+  "tokens_per_second": 8.532763726853414,
+  "peak_memory_mb": 2029.265625,
+  "generated_texts": [
+    " Alex and I am a 17",
+    " Paris. It was founded in 7"
+  ]
+}
