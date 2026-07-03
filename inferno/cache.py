@@ -93,6 +93,70 @@ def compression_ratio(original: torch.Tensor) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Per-channel quantization primitives
+# ---------------------------------------------------------------------------
+
+def quantize_int8_per_channel(
+    tensor: torch.Tensor, dim: int = 1
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Symmetric per-channel INT8 quantization: one scale per slice along `dim`.
+
+    For KV cache tensors of shape [batch, heads, seq_len, head_dim], use dim=1
+    to get one scale per attention head. This keeps each head's dynamic range
+    independent, so an outlier head doesn't crush precision in well-behaved heads.
+
+    # MATH: scale[h] = max(|tensor[:, h, :, :]|) / INT8_MAX
+    #   — per-head max maps that head's largest magnitude to ±127
+    # MATH: q[h] = round(tensor[:, h, :, :] / scale[h]).clamp(-127, 127)
+    #   — same nearest-integer quantization as per-tensor, applied per head
+
+    Returns:
+        quantized: int8 tensor with same shape as input
+        scales:    float32 tensor broadcastable to input shape
+                   (e.g. [1, heads, 1, 1] for dim=1)
+    """
+    tensor_fp32 = tensor.float()
+    ndim = tensor_fp32.ndim
+
+    # Reduce over all dims except the channel dim to get per-channel abs max
+    reduce_dims = tuple(i for i in range(ndim) if i != dim)
+    # MATH: abs_max[c] = max(|tensor| with all dims except c reduced) — per-channel peak
+    abs_max = tensor_fp32.abs().amax(dim=reduce_dims)          # shape: [num_channels]
+
+    # Clamp to 1/INT8_MAX so an all-zero channel maps cleanly to all-zero int8
+    abs_max = abs_max.clamp(min=1.0 / INT8_MAX)
+
+    # MATH: scale[c] = abs_max[c] / INT8_MAX — maps each channel's peak to ±127
+    scales_1d = abs_max / INT8_MAX                              # shape: [num_channels]
+
+    # Reshape to broadcast against the original tensor
+    scale_shape = [1] * ndim
+    scale_shape[dim] = scales_1d.shape[0]
+    scales = scales_1d.reshape(scale_shape).float()            # e.g. [1, heads, 1, 1]
+
+    # MATH: q = round(x / scale).clamp(-127, 127) — per-channel division then rounding
+    quantized = (tensor_fp32 / scales).round().clamp(-INT8_MAX, INT8_MAX).to(torch.int8)
+
+    # TRADEOFF: per-channel scales cost more memory than per-tensor (one float per
+    # head vs one float total), but the overhead is negligible — 32 heads × 2 floats
+    # per K/V = 64 extra bytes per layer, vs MBs of int8 K/V tensor storage.
+    return quantized, scales
+
+
+def dequantize_int8_per_channel(
+    quantized: torch.Tensor, scales: torch.Tensor
+) -> torch.Tensor:
+    """
+    Reconstruct fp32 from INT8 tensor and broadcastable per-channel scales.
+
+    # MATH: x_approx[c] = q[c] * scale[c] — broadcast multiply restores magnitudes
+    """
+    # MATH: x_approx = q * scale — scales broadcast along all dims they are 1 in
+    return quantized.to(torch.float32) * scales
+
+
+# ---------------------------------------------------------------------------
 # Quantized cache layer
 # ---------------------------------------------------------------------------
 
@@ -234,6 +298,122 @@ class QuantizedDynamicCache(DynamicCache):
 
 
 # ---------------------------------------------------------------------------
+# Per-channel quantized cache layer + cache
+# ---------------------------------------------------------------------------
+
+class QuantizedDynamicLayerPerChannel(DynamicLayer):
+    """
+    Like QuantizedDynamicLayer but uses per-channel (per-head) INT8 quantization.
+
+    Stores one scale per attention head instead of one scale for the whole tensor.
+    Reduces quantization error caused by magnitude imbalance across heads.
+
+    Storage: int8 tensor + float32 scales [1, heads, 1, 1] per K/V buffer.
+    The scale overhead is negligible vs the int8 tensor itself.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._keys_int8: torch.Tensor | None = None
+        self._keys_scales: torch.Tensor | None = None
+        self._values_int8: torch.Tensor | None = None
+        self._values_scales: torch.Tensor | None = None
+        self._compression_ratios: list[float] = []
+
+    def lazy_initialization(self, key_states: torch.Tensor) -> None:
+        """Record dtype/device without allocating placeholder fp32 tensors."""
+        self.dtype = key_states.dtype
+        self.device = key_states.device
+        self.is_initialized = True
+
+    def update(
+        self,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        cache_kwargs: Optional[dict] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Append K/V, re-quantize accumulated cache per-channel, return dequantized.
+
+        dim=1 quantizes per attention head (shape [batch, heads, seq, head_dim]).
+        """
+        if not self.is_initialized:
+            self.lazy_initialization(key_states)
+
+        orig_dtype = key_states.dtype
+
+        # Reconstruct previous accumulated cache if present
+        if self._keys_int8 is not None:
+            prev_k = dequantize_int8_per_channel(self._keys_int8, self._keys_scales).to(orig_dtype)  # type: ignore[arg-type]
+            prev_v = dequantize_int8_per_channel(self._values_int8, self._values_scales).to(orig_dtype)  # type: ignore[arg-type]
+            full_k = torch.cat([prev_k, key_states], dim=-2)
+            full_v = torch.cat([prev_v, value_states], dim=-2)
+        else:
+            full_k = key_states
+            full_v = value_states
+
+        self._compression_ratios.append(compression_ratio(full_k))
+        self._compression_ratios.append(compression_ratio(full_v))
+
+        # dim=1 → one scale per attention head (the channel dimension in KV cache)
+        self._keys_int8, self._keys_scales = quantize_int8_per_channel(full_k.float(), dim=1)
+        self._values_int8, self._values_scales = quantize_int8_per_channel(full_v.float(), dim=1)
+
+        # TRADEOFF: dequantizing before attention means compute happens in the
+        # original dtype. Memory savings apply to storage only, not the matmul.
+        return_k = dequantize_int8_per_channel(self._keys_int8, self._keys_scales).to(orig_dtype)
+        return_v = dequantize_int8_per_channel(self._values_int8, self._values_scales).to(orig_dtype)
+        return return_k, return_v
+
+    def get_seq_length(self) -> int:
+        """Return accumulated token count from the stored int8 key tensor."""
+        if self._keys_int8 is None:
+            return 0
+        return self._keys_int8.shape[-2]
+
+    def get_mask_sizes(self, cache_position: torch.Tensor) -> tuple[int, int]:
+        """Return (total_kv_length, kv_offset) for attention mask construction."""
+        query_length = cache_position.shape[0]
+        return self.get_seq_length() + query_length, 0
+
+    def get_max_cache_shape(self) -> int:
+        """Unbounded dynamic cache — returns -1 like DynamicLayer."""
+        return -1
+
+    def mean_compression_ratio(self) -> float:
+        """Return mean compression ratio across all update() calls."""
+        if not self._compression_ratios:
+            return 1.0
+        return sum(self._compression_ratios) / len(self._compression_ratios)
+
+
+class QuantizedDynamicCachePerChannel(DynamicCache):
+    """
+    Drop-in replacement for DynamicCache using per-channel INT8 quantization.
+
+    One scale per attention head (vs one scale per whole K/V tensor in
+    QuantizedDynamicCache). Lower quantization error at negligible extra cost.
+
+    Usage:
+        cache = QuantizedDynamicCachePerChannel()
+        outputs = model.generate(**inputs, past_key_values=cache, ...)
+    """
+
+    def __init__(self) -> None:
+        Cache.__init__(self, layer_class_to_replicate=QuantizedDynamicLayerPerChannel)
+
+    def get_compression_stats(self) -> float:
+        """Return mean compression ratio across all layers. ~4x for fp32, ~2x for bf16."""
+        all_ratios: list[float] = []
+        for layer in self.layers:
+            if isinstance(layer, QuantizedDynamicLayerPerChannel):
+                all_ratios.extend(layer._compression_ratios)
+        if not all_ratios:
+            return 1.0
+        return sum(all_ratios) / len(all_ratios)
+
+
+# ---------------------------------------------------------------------------
 # Perplexity helper
 # ---------------------------------------------------------------------------
 
@@ -270,8 +450,10 @@ def compute_perplexity(
 
             kwargs: dict = {"labels": enc["input_ids"]}
             if cache is not None:
-                # Fresh cache per text so previous sequence's K/V doesn't bleed in
-                kwargs["past_key_values"] = QuantizedDynamicCache()
+                # Fresh cache per text so previous sequence's K/V doesn't bleed in.
+                # type(cache)() works for QuantizedDynamicCache and
+                # QuantizedDynamicCachePerChannel without branching.
+                kwargs["past_key_values"] = type(cache)()
                 kwargs["use_cache"] = True
 
             # labels=input_ids tells the model to compute cross-entropy loss

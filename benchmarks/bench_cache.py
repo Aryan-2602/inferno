@@ -1,9 +1,10 @@
 """
 bench_cache.py — Quantized KV cache vs baseline benchmark for Inferno.
 
-Runs both the fp32 baseline and the INT8-quantized cache in the same script
-to ensure a fair comparison. Measures tokens/sec, peak memory (MB), and
-perplexity for each. Saves results to results/ as JSON and prints a comparison table.
+Runs baseline, INT8 per-tensor, and INT8 per-channel on the same prompts and
+model to ensure a fair comparison. Measures tokens/sec, peak memory (MB), and
+perplexity for each configuration. Saves results to results/ as JSON and prints
+a three-way comparison table.
 """
 
 from __future__ import annotations
@@ -11,13 +12,16 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# Ensure project root is importable when run directly
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import torch
 
 from inferno.baseline import load_model, run_baseline
-from inferno.cache import QuantizedDynamicCache, compute_perplexity
+from inferno.cache import (
+    QuantizedDynamicCache,
+    QuantizedDynamicCachePerChannel,
+    compute_perplexity,
+)
 from inferno.utils import GpuMemoryTracker, get_logger, save_results, wall_time
 
 # ---------------------------------------------------------------------------
@@ -49,42 +53,23 @@ PROMPTS = [
 logger = get_logger(__name__)
 
 
-def run_benchmark() -> None:
+def _run_quantized(
+    model,
+    tokenizer,
+    device: torch.device,
+    cache_cls: type,
+    label: str,
+) -> tuple[float, float, float, float]:
     """
-    Execute baseline and INT8-quantized runs on the same prompts and model,
-    then print a comparison table and save JSON results.
+    Run generate() over all PROMPTS using cache_cls as the KV cache, return
+    (tokens_per_second, peak_memory_mb, perplexity, mean_compression_ratio).
     """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info("Running benchmark on device: %s", device)
-
-    model, tokenizer, device = load_model(device=device)
-
-    # -----------------------------------------------------------------------
-    # Baseline run
-    # -----------------------------------------------------------------------
-    logger.info("=== Baseline run ===")
-    baseline_result = run_baseline(
-        prompts=PROMPTS,
-        max_new_tokens=MAX_NEW_TOKENS,
-        batch_size=BATCH_SIZE,
-        model=model,
-        tokenizer=tokenizer,
-        device=device,
-    )
-    baseline_ppl = compute_perplexity(model, tokenizer, PERPLEXITY_TEXTS, device)
-    logger.info("Baseline perplexity: %.3f", baseline_ppl)
-
-    # -----------------------------------------------------------------------
-    # INT8 quantized run
-    # -----------------------------------------------------------------------
-    logger.info("=== INT8 quantized run ===")
-
-    generated_texts_quant: list[str] = []
-    total_new_tokens_quant = 0
-    combined_cache = QuantizedDynamicCache()   # reused across prompts for stat tracking
+    logger.info("=== %s run ===", label)
+    total_new_tokens = 0
+    last_cache = cache_cls()
 
     mem_tracker = GpuMemoryTracker(device)
-    quant_start = wall_time()
+    start = wall_time()
 
     with mem_tracker:
         for batch_idx in range(0, len(PROMPTS), BATCH_SIZE):
@@ -97,9 +82,7 @@ def run_benchmark() -> None:
             ).to(device)
             input_len = inputs["input_ids"].shape[1]
 
-            # Fresh cache per prompt — each sequence gets its own quantized KV cache.
-            # We keep a reference to the last one for compression stats.
-            prompt_cache = QuantizedDynamicCache()
+            prompt_cache = cache_cls()
             with torch.no_grad():
                 output_ids = model.generate(
                     **inputs,
@@ -109,31 +92,52 @@ def run_benchmark() -> None:
                     past_key_values=prompt_cache,
                 )
 
-            new_ids = output_ids[:, input_len:]
-            total_new_tokens_quant += new_ids.numel()
-            decoded = tokenizer.batch_decode(new_ids, skip_special_tokens=True)
-            generated_texts_quant.extend(decoded)
+            total_new_tokens += output_ids[:, input_len:].numel()
+            last_cache = prompt_cache
 
-            # Accumulate compression ratios from this prompt's cache
-            for layer in prompt_cache.layers:
-                combined_cache._compression_ratios = getattr(combined_cache, '_compression_ratios', [])
-            combined_cache = prompt_cache   # last prompt's cache for stats
+    total_time = wall_time() - start
+    tps = total_new_tokens / total_time if total_time > 0 else 0.0
+    peak_mb = mem_tracker.peak_mb
+    ratio = last_cache.get_compression_stats()
 
-    quant_total_time = wall_time() - quant_start
-    quant_tps = total_new_tokens_quant / quant_total_time if quant_total_time > 0 else 0.0
-    quant_peak_mb = mem_tracker.peak_mb
-    mean_ratio = combined_cache.get_compression_stats()
+    ppl = compute_perplexity(model, tokenizer, PERPLEXITY_TEXTS, device, cache=cache_cls())
+    logger.info("%s: %.2f tok/s | %.1f MB | ppl=%.3f | %.2fx", label, tps, peak_mb, ppl, ratio)
+    return tps, peak_mb, ppl, ratio
 
-    # Quantized perplexity — passes a fresh QuantizedDynamicCache per text
-    quant_ppl = compute_perplexity(
-        model, tokenizer, PERPLEXITY_TEXTS, device,
-        cache=QuantizedDynamicCache(),
+
+def run_benchmark() -> None:
+    """
+    Run all three configurations and print a three-way comparison table.
+    """
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info("Running benchmark on device: %s", device)
+
+    model, tokenizer, device = load_model(device=device)
+
+    # ---- Baseline ----
+    logger.info("=== Baseline run ===")
+    baseline_result = run_baseline(
+        prompts=PROMPTS,
+        max_new_tokens=MAX_NEW_TOKENS,
+        batch_size=BATCH_SIZE,
+        model=model,
+        tokenizer=tokenizer,
+        device=device,
     )
-    logger.info("Quantized perplexity: %.3f", quant_ppl)
+    baseline_ppl = compute_perplexity(model, tokenizer, PERPLEXITY_TEXTS, device)
+    logger.info("Baseline perplexity: %.3f", baseline_ppl)
 
-    # -----------------------------------------------------------------------
-    # Save results
-    # -----------------------------------------------------------------------
+    # ---- INT8 per-tensor ----
+    pt_tps, pt_mb, pt_ppl, pt_ratio = _run_quantized(
+        model, tokenizer, device, QuantizedDynamicCache, "INT8 per-tensor"
+    )
+
+    # ---- INT8 per-channel ----
+    pc_tps, pc_mb, pc_ppl, pc_ratio = _run_quantized(
+        model, tokenizer, device, QuantizedDynamicCachePerChannel, "INT8 per-channel"
+    )
+
+    # ---- Save results ----
     results = {
         "baseline": {
             "tokens_per_second": baseline_result.tokens_per_second,
@@ -141,38 +145,36 @@ def run_benchmark() -> None:
             "perplexity": baseline_ppl,
             "compression": 1.0,
         },
-        "int8_quantized": {
-            "tokens_per_second": quant_tps,
-            "peak_memory_mb": quant_peak_mb,
-            "perplexity": quant_ppl,
-            "compression": mean_ratio,
+        "int8_per_tensor": {
+            "tokens_per_second": pt_tps,
+            "peak_memory_mb": pt_mb,
+            "perplexity": pt_ppl,
+            "compression": pt_ratio,
         },
-        "deltas": {
-            "tokens_per_second": quant_tps - baseline_result.tokens_per_second,
-            "peak_memory_mb": quant_peak_mb - baseline_result.peak_memory_mb,
-            "perplexity": quant_ppl - baseline_ppl,
-            "compression": mean_ratio - 1.0,
+        "int8_per_channel": {
+            "tokens_per_second": pc_tps,
+            "peak_memory_mb": pc_mb,
+            "perplexity": pc_ppl,
+            "compression": pc_ratio,
         },
     }
     path = save_results("bench_cache", results)
     logger.info("Results saved to %s", path)
 
-    # -----------------------------------------------------------------------
-    # Print comparison table
-    # -----------------------------------------------------------------------
-    tps_delta = quant_tps - baseline_result.tokens_per_second
-    mem_delta = quant_peak_mb - baseline_result.peak_memory_mb
-    ppl_delta = quant_ppl - baseline_ppl
+    # ---- Print comparison table ----
+    b = baseline_result
+    W = 14   # column width
 
     print()
-    print("=" * 65)
-    print(f"{'Metric':<20} | {'Baseline':>12} | {'INT8 Quant':>12} | {'Delta':>12}")
-    print("-" * 65)
-    print(f"{'Tokens/sec':<20} | {baseline_result.tokens_per_second:>12.2f} | {quant_tps:>12.2f} | {tps_delta:>+12.2f}")
-    print(f"{'Peak memory MB':<20} | {baseline_result.peak_memory_mb:>12.1f} | {quant_peak_mb:>12.1f} | {mem_delta:>+12.1f}")
-    print(f"{'Perplexity':<20} | {baseline_ppl:>12.3f} | {quant_ppl:>12.3f} | {ppl_delta:>+12.3f}")
-    print(f"{'Compression':<20} | {'1x':>12} | {mean_ratio:>11.2f}x | {'':>12}")
-    print("=" * 65)
+    print("=" * 72)
+    print(f"{'Metric':<20} | {'Baseline':>{W}} | {'Per-Tensor':>{W}} | {'Per-Channel':>{W}}")
+    print("-" * 72)
+    print(f"{'Tokens/sec':<20} | {b.tokens_per_second:>{W}.2f} | {pt_tps:>{W}.2f} | {pc_tps:>{W}.2f}")
+    print(f"{'Peak memory MB':<20} | {b.peak_memory_mb:>{W}.1f} | {pt_mb:>{W}.1f} | {pc_mb:>{W}.1f}")
+    print(f"{'Perplexity':<20} | {baseline_ppl:>{W}.3f} | {pt_ppl:>{W}.3f} | {pc_ppl:>{W}.3f}")
+    print(f"{'Perplexity delta':<20} | {'—':>{W}} | {pt_ppl-baseline_ppl:>+{W}.3f} | {pc_ppl-baseline_ppl:>+{W}.3f}")
+    print(f"{'Compression':<20} | {'1x':>{W}} | {pt_ratio:>{W-1}.2f}x | {pc_ratio:>{W-1}.2f}x")
+    print("=" * 72)
 
 
 if __name__ == "__main__":

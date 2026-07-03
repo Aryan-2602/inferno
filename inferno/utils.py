@@ -30,8 +30,10 @@ def get_logger(name: str) -> logging.Logger:
 
 
 def now_iso() -> str:
-    """Return current UTC time as a compact ISO string safe for filenames."""
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    """Return current UTC time as a compact ISO string safe for filenames (millisecond precision)."""
+    dt = datetime.now(timezone.utc)
+    ms = dt.microsecond // 1000
+    return dt.strftime(f"%Y%m%dT%H%M%S") + f"{ms:03d}Z"
 
 
 def save_results(name: str, data: dict[str, Any]) -> Path:

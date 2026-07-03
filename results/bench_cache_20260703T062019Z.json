@@ -1,0 +1,20 @@
+{
+  "baseline": {
+    "tokens_per_second": 13.156994081894409,
+    "peak_memory_mb": 1954.9375,
+    "perplexity": 4.960186958312988,
+    "compression": 1.0
+  },
+  "int8_per_tensor": {
+    "tokens_per_second": 13.751829079558062,
+    "peak_memory_mb": 2017.3125,
+    "perplexity": 7.052267074584961,
+    "compression": 4.0
+  },
+  "int8_per_channel": {
+    "tokens_per_second": 13.565875185100413,
+    "peak_memory_mb": 1997.484375,
+    "perplexity": 8.553356170654297,
+    "compression": 4.0
+  }
+}

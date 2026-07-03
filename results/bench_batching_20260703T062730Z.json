@@ -1,0 +1,14 @@
+{
+  "static_batching": {
+    "tokens_per_second": 29.12841592496177,
+    "mean_latency_ms": 4388.560770952608,
+    "max_latency_ms": 4744.611499947496,
+    "total_tokens": 256
+  },
+  "continuous_batching": {
+    "tokens_per_second": 14.577781289595992,
+    "mean_latency_ms": 3314.3473854870535,
+    "max_latency_ms": 5997.553374967538,
+    "total_tokens": 120
+  }
+}
