@@ -1,0 +1,22 @@
+{
+  "model_id": "Qwen/Qwen2.5-0.5B-Instruct",
+  "num_prompts": 10,
+  "max_new_tokens": 64,
+  "batch_size": 1,
+  "ttft_seconds": 0.6527381249470636,
+  "total_time_seconds": 48.64332962501794,
+  "tokens_per_second": 13.156994081894409,
+  "peak_memory_mb": 1954.9375,
+  "generated_texts": [
+    " The theory of relativity is a set of scientific theories that describe the physical laws of the universe at all scales, from subatomic particles to galaxies and beyond. These theories were developed by Albert Einstein in the early 20th century and have since become fundamental to our understanding of the universe.\n\nThe key concepts of rel",
+    " The French Revolution was a complex and multifaceted event that resulted from a combination of factors, including political, social, economic, and cultural changes. Here is a summary of some of the key causes:\n\n1. Political Changes: The French Revolution began with the rise of Napoleon Bonaparte as the new king of France",
+    " A neural network is a type of machine learning algorithm that can learn and make predictions based on input data. The process of learning involves several steps:\n\n1. Data Preparation: The first step in the learning process is to prepare the data for the neural network. This includes cleaning, normalizing, and splitting the data into training",
+    " Machine learning and deep learning are two related but distinct fields of artificial intelligence. Here's a brief overview of each:\n\n1. Definition:\nMachine learning is an umbrella term that encompasses various techniques used to develop algorithms that can learn from data without being explicitly programmed. It involves training models on large datasets, allowing them to automatically improve",
+    " Photosynthesis is the process by which plants, algae, and some bacteria convert light energy into chemical energy stored in glucose. The process occurs in the chloroplasts of plant cells.\nThe main steps of photosynthesis are:\n1) Light absorption: Chlorophyll molecules absorb light energy from sunlight or other sources.\n2)",
+    " Quantum entanglement is like when two particles become connected in such a way that the state of one particle can instantly affect the other, no matter how far apart they are. Imagine you have two toy cars that are stuck together on a track. If you move one car, it will instantly change the position and direction of",
+    " The major events of World War II include:\n\n1. The invasion of Poland by Nazi Germany on September 1, 1939.\n\n2. The attack on Pearl Harbor by Japan on December 7, 1941.\n\n3. The invasion of the United States and its territories by the Imperial Japanese",
+    " The human immune system is a complex network of cells, tissues, and organs that work together to protect the body from viral infections. Here's an overview of how it fights viruses:\n\n1. Antigen presentation: When a virus enters the body, it triggers the immune system to produce antibodies against its surface proteins (antig",
+    " The Turing test, also known as the artificial intelligence (AI) test or the human-computer interaction test, is a widely recognized measure of AI's ability to exhibit intelligent behavior. It was developed by British computer scientist Alan Turing in 1950 and has since become one of the most important tools for evaluating the",
+    " The water cycle is a continuous process that involves the movement of water on, above, and below the surface of the Earth. It occurs in three stages: evaporation, condensation, and precipitation.\n\n1. Evaporation: Water from oceans, lakes, rivers, and other bodies of water evaporates into the air as"
+  ]
+}
