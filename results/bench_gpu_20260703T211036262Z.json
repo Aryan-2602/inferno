@@ -1,0 +1,40 @@
+{
+  "device": "Tesla T4",
+  "cache_benchmark": {
+    "baseline": {
+      "tokens_per_second": 30.8,
+      "peak_memory_mb": 962.2,
+      "perplexity": 23.704,
+      "ttft_ms": 37.3,
+      "compression": 1.0
+    },
+    "int8_per_tensor": {
+      "tokens_per_second": 23.7,
+      "peak_memory_mb": 961.8,
+      "perplexity": 26.019,
+      "ttft_ms": 36.6,
+      "compression": 2.0
+    },
+    "int8_per_channel": {
+      "tokens_per_second": 23.7,
+      "peak_memory_mb": 961.8,
+      "perplexity": 25.281,
+      "ttft_ms": 37.2,
+      "compression": 2.0
+    }
+  },
+  "batching_benchmark": {
+    "static_batching": {
+      "tokens_per_second": 66.38,
+      "mean_latency_ms": 898.0,
+      "max_latency_ms": 1180.0,
+      "total_tokens": 120
+    },
+    "continuous_batching": {
+      "tokens_per_second": 31.82,
+      "mean_latency_ms": 1514.0,
+      "max_latency_ms": 2733.0,
+      "total_tokens": 120
+    }
+  }
+}
