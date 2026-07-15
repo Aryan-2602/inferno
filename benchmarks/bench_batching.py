@@ -30,6 +30,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import numpy as np
 import torch
 
 from inferno.baseline import load_model
@@ -144,6 +145,9 @@ def run_static_batching(requests: list[Request], model, tokenizer, device: torch
     tps = total_tokens / total_time if total_time > 0 else 0.0
     mean_lat = sum(latencies_ms) / len(latencies_ms)
     max_lat = max(latencies_ms)
+    p50_lat = float(np.percentile(latencies_ms, 50))
+    p95_lat = float(np.percentile(latencies_ms, 95))
+    p99_lat = float(np.percentile(latencies_ms, 99))
 
     logger.info(
         "Static batching: %.2f tok/s | mean lat=%.0f ms | max lat=%.0f ms | tokens=%d",
@@ -153,6 +157,9 @@ def run_static_batching(requests: list[Request], model, tokenizer, device: torch
         "tokens_per_second": tps,
         "mean_latency_ms": mean_lat,
         "max_latency_ms": max_lat,
+        "p50_latency_ms": p50_lat,
+        "p95_latency_ms": p95_lat,
+        "p99_latency_ms": p99_lat,
         "total_tokens": total_tokens,
     }
 
@@ -185,6 +192,9 @@ def run_continuous_batching(requests: list[Request], model, tokenizer, device: t
     tps = total_tokens / total_time if total_time > 0 else 0.0
     mean_lat = sum(latencies_ms) / len(latencies_ms)
     max_lat = max(latencies_ms)
+    p50_lat = float(np.percentile(latencies_ms, 50))
+    p95_lat = float(np.percentile(latencies_ms, 95))
+    p99_lat = float(np.percentile(latencies_ms, 99))
 
     logger.info(
         "Continuous batching: %.2f tok/s | mean lat=%.0f ms | max lat=%.0f ms | tokens=%d",
@@ -194,6 +204,9 @@ def run_continuous_batching(requests: list[Request], model, tokenizer, device: t
         "tokens_per_second": tps,
         "mean_latency_ms": mean_lat,
         "max_latency_ms": max_lat,
+        "p50_latency_ms": p50_lat,
+        "p95_latency_ms": p95_lat,
+        "p99_latency_ms": p99_lat,
         "total_tokens": total_tokens,
     }
 
@@ -246,6 +259,9 @@ def run_benchmark() -> None:
     print("-" * 60)
     print(f"{'Tokens/sec':<22} | {static['tokens_per_second']:>{W}.2f} | {continuous['tokens_per_second']:>{W}.2f}")
     print(f"{'Mean latency ms':<22} | {static['mean_latency_ms']:>{W}.0f} | {continuous['mean_latency_ms']:>{W}.0f}")
+    print(f"{'p50 latency ms':<22} | {static['p50_latency_ms']:>{W}.0f} | {continuous['p50_latency_ms']:>{W}.0f}")
+    print(f"{'p95 latency ms':<22} | {static['p95_latency_ms']:>{W}.0f} | {continuous['p95_latency_ms']:>{W}.0f}")
+    print(f"{'p99 latency ms':<22} | {static['p99_latency_ms']:>{W}.0f} | {continuous['p99_latency_ms']:>{W}.0f}")
     print(f"{'Max latency ms':<22} | {static['max_latency_ms']:>{W}.0f} | {continuous['max_latency_ms']:>{W}.0f}")
     print(f"{'Total tokens':<22} | {static['total_tokens']:>{W}d} | {continuous['total_tokens']:>{W}d}")
     print("=" * 60)

@@ -1,0 +1,7 @@
+{
+  "draft_model": "mock",
+  "target_model": "mock",
+  "gamma": 2,
+  "acceptance_rate": 0.75,
+  "tokens_per_second": 10.0
+}

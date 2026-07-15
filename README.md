@@ -319,9 +319,95 @@ python benchmarks/bench_gpu.py     # full GPU suite; saves to results/bench_gpu_
 | `test_engine.py` | 9 | Single request completes with non-empty output; two simultaneous requests both complete; `max_batch_size` never exceeded (instrumented step wrapper); `latency_ms > 0` and `< 120 s`; late-submitted request is not dropped; identical prompts produce identical output (greedy determinism) |
 
 ```
-tests/test_baseline.py   9 passed
-tests/test_cache.py     28 passed
-tests/test_engine.py     9 passed
-─────────────────────────────
-46 passed in ~25 s  (CPU, Qwen2.5-0.5B)
+tests/test_baseline.py    9 passed
+tests/test_cache.py      28 passed
+tests/test_engine.py      9 passed
+tests/test_speculative.py 4 passed
+──────────────────────────────────
+50 passed in ~30 s  (CPU, Qwen2.5-0.5B; speculative tests use mocked models)
 ```
+
+---
+
+## Speculative Decoding
+
+Speculative decoding ([Leviathan et al., 2023](https://arxiv.org/abs/2211.17192)) accelerates
+autoregressive generation by pairing a small **draft model** with a large **target model**.
+At each step the draft model proposes *gamma* tokens cheaply, then the target model verifies
+all *gamma+1* positions in one forward pass. Accepted tokens come from the target distribution
+exactly — the output is provably identical to sampling from the target model alone, with speedup
+proportional to the **acceptance rate** (fraction of draft tokens the target would have chosen).
+
+### Implementation (`inferno/speculative.py`)
+
+```
+SpecdecEngine(draft_model, draft_tokenizer, target_model, target_tokenizer, device, gamma=4)
+
+generate(prompt, max_new_tokens=64) → {
+    generated_text    : str
+    tokens_generated  : int
+    acceptance_rate   : float   # mean fraction of draft tokens accepted per step, 0–1
+    time_seconds      : float
+    tokens_per_second : float
+}
+```
+
+**Models:**
+- Draft: `Qwen/Qwen2.5-0.5B-Instruct` (same as the rest of the project)
+- Target: `Qwen/Qwen2.5-1.5B-Instruct` (3× larger, sets the output distribution)
+
+**Algorithm per speculative step:**
+1. Draft samples *gamma* tokens autoregressively, storing the full vocabulary distribution `q` at each step.
+2. Target runs one forward pass on `[prompt + all draft tokens]`.
+3. Token *i* is accepted with probability `min(1, p_target(d_i) / q_draft(d_i))`.
+4. On rejection, resample from the corrected distribution `max(0, p_target − q_draft) / Z` — this guarantees the marginal output equals `p_target` exactly.
+5. If all *gamma* tokens are accepted, sample one bonus token from the target.
+
+**`acceptance_rate`** is the mean fraction of draft tokens accepted per step.
+A rate of 1.0 means the draft always predicts what the target would have chosen
+(maximum speedup: `gamma+1` tokens per target call). A rate of 0.0 means every draft
+token is rejected (pure overhead; speedup drops below 1×). Expected rate on Qwen pairs
+depends on how well the 0.5B distribution approximates the 1.5B distribution.
+
+### How to run
+
+```bash
+source .venv/bin/activate
+python scripts/check_gpu.py          # must pass first
+python benchmarks/bench_speculative.py
+```
+
+Results saved to `results/bench_speculative_{timestamp}.json`.
+
+---
+
+## vLLM Comparison
+
+[vLLM](https://github.com/vllm-project/vllm) is a production LLM inference library that implements
+PagedAttention (non-contiguous KV cache blocks), continuous batching with variable-length forward
+passes (FlashAttention `cu_seqlens` interface), and fused CUDA kernels throughout. Comparing
+against it is meaningful because vLLM represents the *engineering ceiling* for what the optimizations
+in this project are working toward:
+
+- **KV cache quantization** — vLLM supports INT8 KV cache natively via `kv_cache_dtype="fp8"`;
+  the gap to Inferno's manual INT8 implementation reveals the kernel-fusion benefit.
+- **Continuous batching** — vLLM's scheduler packs multiple sequences into one forward pass;
+  Inferno's engine runs one pass per sequence. The throughput ratio quantifies that gap.
+- **PagedAttention** — vLLM avoids KV cache memory fragmentation at scale; Inferno allocates
+  contiguous buffers per sequence.
+
+### How to run
+
+```bash
+# Install vLLM (requires CUDA; large install, separate from project deps)
+pip install -r requirements_vllm.txt
+
+# Run comparison benchmark (exits cleanly if vLLM is not installed)
+python benchmarks/bench_vllm.py
+```
+
+The script exits with exit code 0 and prints install instructions if vLLM is not available —
+it does not crash or raise an ImportError.
+
+Results saved to `results/bench_vllm_{timestamp}.json`. The comparison table loads the most
+recent `results/bench_gpu_*.json` automatically for Inferno numbers.
