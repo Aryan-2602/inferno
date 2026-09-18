@@ -113,3 +113,30 @@ class GpuMemoryTracker:
 def wall_time() -> float:
     """Return a high-resolution wall-clock timestamp in seconds."""
     return time.perf_counter()
+
+
+# ---------------------------------------------------------------------------
+# Compute dtype selection
+# ---------------------------------------------------------------------------
+
+# bfloat16 has no native hardware support below compute capability 8.0 (Ampere).
+# On older cards (e.g. Tesla T4, sm75) torch silently emulates it, which is slow,
+# and vLLM refuses to start at all. float16 is native there.
+MIN_BF16_COMPUTE_CAPABILITY = 8
+
+
+def select_torch_dtype(device: torch.device) -> torch.dtype:
+    """
+    Return the compute dtype to load models in on this device.
+
+    float32 on CPU (keeps memory arithmetic predictable), bfloat16 on Ampere and
+    newer, float16 on pre-Ampere CUDA cards.
+
+    Every model load in the project goes through this so that Inferno and the
+    vLLM comparison run at the same dtype — a mismatch would make the
+    head-to-head numbers meaningless rather than merely imprecise.
+    """
+    if device.type != "cuda":
+        return torch.float32
+    major, _minor = torch.cuda.get_device_capability(device)
+    return torch.bfloat16 if major >= MIN_BF16_COMPUTE_CAPABILITY else torch.float16

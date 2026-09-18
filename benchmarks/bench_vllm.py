@@ -42,7 +42,7 @@ import numpy as np
 import torch
 
 from inferno.baseline import DEFAULT_MODEL_ID
-from inferno.utils import RESULTS_DIR, get_logger, save_results, wall_time
+from inferno.utils import RESULTS_DIR, get_logger, save_results, select_torch_dtype, wall_time
 
 # ---------------------------------------------------------------------------
 # Constants — identical to bench_gpu.py so comparison is apples-to-apples
@@ -64,6 +64,17 @@ PROMPTS = [
 MAX_NEW_TOKENS = 64
 
 logger = get_logger(__name__)
+
+
+def select_vllm_dtype(device: torch.device) -> str:
+    """
+    Return the vLLM dtype string matching what Inferno loads on this device.
+
+    Delegates to select_torch_dtype() — the same helper baseline.py uses — so
+    both sides of the comparison run at one dtype. On a pre-Ampere card (T4)
+    that is float16 for both, not bfloat16 for one and float16 for the other.
+    """
+    return str(select_torch_dtype(device)).removeprefix("torch.")
 
 
 # ---------------------------------------------------------------------------
@@ -99,9 +110,9 @@ def run_vllm_benchmark() -> dict:
         print("ERROR: No CUDA device found. bench_vllm.py requires a GPU.")
         sys.exit(1)
 
-    logger.info("Loading %s via vLLM ...", DEFAULT_MODEL_ID)
-    # dtype="bfloat16" matches the GPU dtype used in baseline.py
-    llm = LLM(model=DEFAULT_MODEL_ID, dtype="bfloat16")
+    dtype = select_vllm_dtype(torch.device("cuda"))
+    logger.info("Loading %s via vLLM (dtype=%s) ...", DEFAULT_MODEL_ID, dtype)
+    llm = LLM(model=DEFAULT_MODEL_ID, dtype=dtype)
     sampling_params = SamplingParams(temperature=0.0, max_tokens=MAX_NEW_TOKENS)
 
     # Per-request latency: one request at a time
@@ -131,6 +142,7 @@ def run_vllm_benchmark() -> dict:
     )
     return {
         "model": DEFAULT_MODEL_ID,
+        "dtype": dtype,
         "tokens_per_second": tps,
         "total_tokens": total_tokens,
         "mean_latency_ms": mean_lat,
@@ -167,6 +179,11 @@ def run_benchmark() -> None:
     print("=" * 92)
     print("  vLLM vs Inferno — GPU Comparison")
     print(f"  (Inferno source: {sorted(RESULTS_DIR.glob('bench_gpu_*.json'))[-1].name if inferno else 'not found'})")
+    # State the dtype on both sides: the comparison only holds if they match.
+    v_dtype = vllm_results["dtype"]
+    i_dtype = inferno.get("dtype", "unknown") if inferno else "unknown"
+    parity = "match" if v_dtype == i_dtype else "MISMATCH — numbers not comparable"
+    print(f"  (dtype — vLLM: {v_dtype} | Inferno: {i_dtype} — {parity})")
     print("=" * 92)
 
     W = 14

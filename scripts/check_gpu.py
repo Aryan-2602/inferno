@@ -20,11 +20,13 @@ Expected output on a healthy GPU environment:
 from __future__ import annotations
 
 import sys
+import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import torch
+import transformers
 
 from inferno.baseline import load_model
 from inferno.cache import (
@@ -68,6 +70,9 @@ def check_gpu() -> None:
 
     # ---- CUDA availability ----
     print(f"\n[1] PyTorch version  : {torch.__version__}")
+    # transformers version matters: the quantized cache subclasses the Cache /
+    # DynamicLayer API, which changes shape between releases.
+    print(f"    Transformers     : {transformers.__version__}")
     print(f"    CUDA available   : {torch.cuda.is_available()}")
 
     if torch.cuda.is_available():
@@ -149,6 +154,10 @@ def check_gpu() -> None:
     except Exception as exc:
         msg = f"Quantized cache (per-tensor) failed: {exc}"
         print(f"    FAILED: {msg}")
+        # Print the frames too: the exception text alone ("'int' object has no
+        # attribute 'shape'") does not identify which cache hook broke against
+        # a newer transformers Cache API.
+        traceback.print_exc()
         failures.append(msg)
 
     # ---- Quantized cache (per-channel) ----
@@ -170,6 +179,10 @@ def check_gpu() -> None:
     except Exception as exc:
         msg = f"Quantized cache (per-channel) failed: {exc}"
         print(f"    FAILED: {msg}")
+        # Print the frames too: the exception text alone ("'int' object has no
+        # attribute 'shape'") does not identify which cache hook broke against
+        # a newer transformers Cache API.
+        traceback.print_exc()
         failures.append(msg)
 
     # ---- Perplexity (baseline) ----

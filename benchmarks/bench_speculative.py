@@ -174,6 +174,7 @@ def run_benchmark() -> None:
 
     all_results = {
         "device": torch.cuda.get_device_name(device),
+        "dtype": str(target_model.dtype).removeprefix("torch."),
         "gamma": GAMMA,
         "autoregressive": ar_results,
         "speculative": spec_results,
