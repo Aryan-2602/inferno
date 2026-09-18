@@ -272,6 +272,7 @@ def run_benchmark() -> None:
     logger.info("GPU benchmark starting on: %s", torch.cuda.get_device_name(device))
 
     model, tokenizer, device = load_model(device=device)
+    logger.info("Compute dtype: %s", model.dtype)
 
     logger.info("Loading wikitext-2 test samples ...")
     wikitext_samples = load_wikitext_samples()
@@ -286,6 +287,9 @@ def run_benchmark() -> None:
     # ---- Save ----
     all_results = {
         "device": torch.cuda.get_device_name(device),
+        # Recorded so the run is self-documenting: the vLLM comparison is only
+        # valid if both sides ran at this same dtype.
+        "dtype": str(model.dtype).removeprefix("torch."),
         "cache_benchmark": cache_results,
         "batching_benchmark": batching_results,
     }

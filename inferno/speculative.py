@@ -25,7 +25,7 @@ from typing import Optional
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from inferno.utils import get_logger, wall_time
+from inferno.utils import get_logger, select_torch_dtype, wall_time
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -242,12 +242,12 @@ def load_draft_and_target(
     Load both draft and target models onto device.
 
     Returns (draft_model, draft_tokenizer, target_model, target_tokenizer, device).
-    Uses bfloat16 on CUDA, float32 on CPU — consistent with load_model() in baseline.py.
+    Dtype comes from select_torch_dtype() — consistent with load_model() in baseline.py.
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    dtype = torch.float32 if device.type == "cpu" else torch.bfloat16
+    dtype = select_torch_dtype(device)
 
     logger.info("Loading draft model: %s", draft_model_id)
     draft_tokenizer = AutoTokenizer.from_pretrained(draft_model_id, trust_remote_code=True)

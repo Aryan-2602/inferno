@@ -14,7 +14,7 @@ from typing import Optional
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from inferno.utils import GpuMemoryTracker, get_logger, save_results, wall_time
+from inferno.utils import GpuMemoryTracker, get_logger, save_results, select_torch_dtype, wall_time
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -57,8 +57,8 @@ def load_model(
     """
     Load model and tokenizer from HuggingFace Hub onto the resolved device.
 
-    Uses float32 on CPU to keep memory arithmetic predictable; on CUDA we use
-    the model's native dtype (bfloat16 for Qwen2.5).
+    Uses float32 on CPU to keep memory arithmetic predictable; on CUDA the dtype
+    comes from select_torch_dtype() (bfloat16 on Ampere+, float16 on older cards).
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -74,7 +74,7 @@ def load_model(
     # for all sequences shorter than the longest in a batch.
     tokenizer.padding_side = "left"
 
-    dtype = torch.float32 if device.type == "cpu" else torch.bfloat16
+    dtype = select_torch_dtype(device)
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
         dtype=dtype,
