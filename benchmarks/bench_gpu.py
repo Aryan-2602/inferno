@@ -57,6 +57,11 @@ from benchmarks.bench_batching import build_workload, run_static_batching, run_c
 
 MAX_NEW_TOKENS = 64
 BATCH_SIZE = 1
+# Namespaced repo id: the bare "wikitext" id resolves to the legacy
+# loading-script path, which newer datasets/huggingface_hub reject with
+# HfUriError ("Repository id must be 'namespace/name'").
+WIKITEXT_DATASET_ID = "Salesforce/wikitext"
+WIKITEXT_CONFIG = "wikitext-2-raw-v1"
 WIKITEXT_NUM_SAMPLES = 20       # number of excerpts from wikitext-2 test set
 WIKITEXT_MIN_CHARS = 100        # skip very short lines
 PROMPTS = [
@@ -87,7 +92,7 @@ def load_wikitext_samples() -> list[str]:
     Filters out blank lines and headings (lines starting with '=') to get
     plain prose passages that give a meaningful perplexity reading.
     """
-    ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+    ds = load_dataset(WIKITEXT_DATASET_ID, WIKITEXT_CONFIG, split="test")
     samples: list[str] = []
     for row in ds:
         text = row["text"].strip()

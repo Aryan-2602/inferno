@@ -175,6 +175,23 @@ def dequantize_int8_per_channel(
 
 
 # ---------------------------------------------------------------------------
+# transformers version compatibility
+# ---------------------------------------------------------------------------
+
+def _resolve_query_length(query_length_or_cache_position: torch.Tensor | int) -> int:
+    """
+    Return the query length from either transformers calling convention.
+
+    transformers >= 5.0 calls layer.get_mask_sizes(query_length: int); 4.x called
+    layer.get_mask_sizes(cache_position: Tensor) and the layer derived the length
+    itself. Accept both so the quantized cache works across that boundary.
+    """
+    if isinstance(query_length_or_cache_position, torch.Tensor):
+        return query_length_or_cache_position.shape[0]
+    return int(query_length_or_cache_position)
+
+
+# ---------------------------------------------------------------------------
 # Quantized cache layer
 # ---------------------------------------------------------------------------
 
@@ -196,12 +213,17 @@ class QuantizedDynamicLayer(DynamicLayer):
         self._qt_values: QuantizedTensor | None = None
         self._compression_ratios: list[float] = []
 
-    def lazy_initialization(self, key_states: torch.Tensor) -> None:
+    def lazy_initialization(
+        self, key_states: torch.Tensor, value_states: Optional[torch.Tensor] = None
+    ) -> None:
         """
         Record dtype/device for later use without allocating fp32 tensors.
 
         We override the parent to avoid creating the dummy empty fp32 tensors
         that DynamicLayer.lazy_initialization allocates; we store INT8 instead.
+
+        value_states is accepted and ignored: transformers >= 5.0 passes it,
+        4.x did not, and dtype/device come from key_states either way.
         """
         self.dtype = key_states.dtype
         self.device = key_states.device
@@ -212,7 +234,8 @@ class QuantizedDynamicLayer(DynamicLayer):
         self,
         key_states: torch.Tensor,
         value_states: torch.Tensor,
-        cache_kwargs: Optional[dict] = None,
+        *args,
+        **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Append new K/V, quantize the accumulated cache as INT8, return dequantized.
@@ -257,10 +280,12 @@ class QuantizedDynamicLayer(DynamicLayer):
             return 0
         return self._qt_keys.data.shape[-2]
 
-    def get_mask_sizes(self, cache_position: torch.Tensor) -> tuple[int, int]:
+    def get_mask_sizes(
+        self, query_length_or_cache_position: torch.Tensor | int
+    ) -> tuple[int, int]:
         """Return (total_kv_length, kv_offset) needed for attention mask construction."""
         kv_offset = 0
-        query_length = cache_position.shape[0]
+        query_length = _resolve_query_length(query_length_or_cache_position)
         kv_length = self.get_seq_length() + query_length
         return kv_length, kv_offset
 
@@ -338,8 +363,14 @@ class QuantizedDynamicLayerPerChannel(DynamicLayer):
         self._values_scales: torch.Tensor | None = None
         self._compression_ratios: list[float] = []
 
-    def lazy_initialization(self, key_states: torch.Tensor) -> None:
-        """Record dtype/device without allocating placeholder fp32 tensors."""
+    def lazy_initialization(
+        self, key_states: torch.Tensor, value_states: Optional[torch.Tensor] = None
+    ) -> None:
+        """
+        Record dtype/device without allocating placeholder fp32 tensors.
+
+        value_states is accepted and ignored — see QuantizedDynamicLayer.
+        """
         self.dtype = key_states.dtype
         self.device = key_states.device
         self.is_initialized = True
@@ -348,7 +379,8 @@ class QuantizedDynamicLayerPerChannel(DynamicLayer):
         self,
         key_states: torch.Tensor,
         value_states: torch.Tensor,
-        cache_kwargs: Optional[dict] = None,
+        *args,
+        **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Append K/V, re-quantize accumulated cache per-channel, return dequantized.
@@ -389,9 +421,11 @@ class QuantizedDynamicLayerPerChannel(DynamicLayer):
             return 0
         return self._keys_int8.shape[-2]
 
-    def get_mask_sizes(self, cache_position: torch.Tensor) -> tuple[int, int]:
+    def get_mask_sizes(
+        self, query_length_or_cache_position: torch.Tensor | int
+    ) -> tuple[int, int]:
         """Return (total_kv_length, kv_offset) for attention mask construction."""
-        query_length = cache_position.shape[0]
+        query_length = _resolve_query_length(query_length_or_cache_position)
         return self.get_seq_length() + query_length, 0
 
     def get_max_cache_shape(self) -> int:

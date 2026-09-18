@@ -63,7 +63,24 @@ PROMPTS = [
 
 MAX_NEW_TOKENS = 64
 
+# bfloat16 needs compute capability >= 8.0 (Ampere). vLLM refuses to start on
+# older cards; Turing (T4, sm75) must use float16.
+MIN_BF16_COMPUTE_CAPABILITY = 8
+
 logger = get_logger(__name__)
+
+
+def select_vllm_dtype() -> str:
+    """
+    Pick the widest dtype this GPU actually supports, as a vLLM dtype string.
+
+    Returns "bfloat16" on Ampere and newer, "float16" on older cards (e.g. T4).
+    NOTE: baseline.py always loads in bfloat16 on CUDA, so on a pre-Ampere GPU
+    the vLLM and Inferno numbers are measured at different dtypes and are not
+    strictly apples-to-apples. The chosen dtype is recorded in the saved JSON.
+    """
+    major, _minor = torch.cuda.get_device_capability()
+    return "bfloat16" if major >= MIN_BF16_COMPUTE_CAPABILITY else "float16"
 
 
 # ---------------------------------------------------------------------------
@@ -99,9 +116,9 @@ def run_vllm_benchmark() -> dict:
         print("ERROR: No CUDA device found. bench_vllm.py requires a GPU.")
         sys.exit(1)
 
-    logger.info("Loading %s via vLLM ...", DEFAULT_MODEL_ID)
-    # dtype="bfloat16" matches the GPU dtype used in baseline.py
-    llm = LLM(model=DEFAULT_MODEL_ID, dtype="bfloat16")
+    dtype = select_vllm_dtype()
+    logger.info("Loading %s via vLLM (dtype=%s) ...", DEFAULT_MODEL_ID, dtype)
+    llm = LLM(model=DEFAULT_MODEL_ID, dtype=dtype)
     sampling_params = SamplingParams(temperature=0.0, max_tokens=MAX_NEW_TOKENS)
 
     # Per-request latency: one request at a time
@@ -131,6 +148,7 @@ def run_vllm_benchmark() -> dict:
     )
     return {
         "model": DEFAULT_MODEL_ID,
+        "dtype": dtype,
         "tokens_per_second": tps,
         "total_tokens": total_tokens,
         "mean_latency_ms": mean_lat,
