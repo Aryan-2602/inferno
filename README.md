@@ -5,8 +5,9 @@
 Inferno is a from-scratch LLM inference optimization engine built on top of HuggingFace
 Transformers. It implements INT8 KV cache quantization (per-tensor and per-channel variants)
 and a continuous batching scheduler that admits new requests mid-generation without waiting
-for the current batch to finish. All results are measured — no theoretical projections.
-Benchmarked on CPU (Qwen2.5-0.5B, Apple Silicon) and GPU (Tesla T4, Kaggle).
+for the current batch to finish, plus a speculative-decoding engine and a head-to-head vLLM
+comparison. All results are measured — no theoretical projections, and negative results are
+reported as such. Benchmarked on CPU (Qwen2.5-0.5B, Apple Silicon) and GPU (Tesla T4, Kaggle).
 
 ---
 
@@ -26,8 +27,8 @@ step. At 64 decode steps with a KV cache growing to several hundred tokens, thos
 are re-read from memory 64 times. This phase is *memory-bandwidth-bound*.
 
 **KV cache quantization** attacks the decode bottleneck directly. Storing K/V tensors as
-INT8 instead of BF16 halves the bytes transferred from HBM on every decode step. The compute
-cost of dequantizing back to BF16 before the attention matmul is meant to be small compared
+INT8 instead of a 16-bit float halves the bytes transferred from HBM on every decode step. The
+compute cost of dequantizing back to that float dtype before the attention matmul is meant to be small compared
 to the memory transfer savings — though as the T4 results show, whether this trade is
 profitable depends on the hardware's memory-bandwidth-to-compute ratio.
 
@@ -44,70 +45,115 @@ than padding steps — the benefit grows with the number of concurrent users.
 
 All numbers come from `results/` JSON files produced by the benchmark scripts.
 
+Every model load in the project routes through `inferno/utils.py::select_torch_dtype()`
+— FP32 on CPU, BF16 on Ampere and newer, FP16 below — so Inferno and the vLLM comparison
+always run at the same dtype on the same machine. Each results JSON records the dtype it
+ran at.
+
 ### KV Cache Quantization — GPU (Tesla T4, Kaggle)
 
-*Source: `results/bench_gpu_20260703T211036262Z.json`*  
+*Source: `results/bench_gpu_20260918T195827668Z.json`*  
+*Environment: Tesla T4 (sm75), torch 2.13.0+cu130, transformers 5.17.0, compute dtype **float16**.*  
 *Perplexity evaluated on 20 excerpts from wikitext-2-raw-v1 test split.*
 
 | Metric           | Baseline | INT8 Per-Tensor | INT8 Per-Channel |
 |:-----------------|--------:|----------------:|-----------------:|
-| Tokens/sec       |    30.8 |            23.7 |             23.7 |
-| Peak memory MB   |   962.2 |           961.8 |            961.8 |
-| Perplexity (WT2) |   23.70 |           26.02 |            25.28 |
-| Perplexity Δ     |       — |           +2.32 |            +1.58 |
+| Tokens/sec       |    26.9 |            21.8 |             21.4 |
+| Peak memory MB   |   961.2 |           960.8 |            960.8 |
+| Perplexity (WT2) |   23.77 |           25.51 |            25.01 |
+| Perplexity Δ     |       — |           +1.74 |            +1.24 |
 | Compression      |      1× |            2.0× |             2.0× |
-| TTFT ms          |    37.3 |            36.6 |             37.2 |
+| TTFT ms          |    36.9 |            38.1 |             37.7 |
 
-**Why compression is 2× not 4×.** The GPU baseline loads weights in BF16 (2 bytes/element).
+**Why float16 and not bfloat16.** The T4 is Turing (compute capability 7.5). bfloat16 has no
+native tensor-core support below 8.0 — PyTorch will run it, but without hardware acceleration,
+and vLLM refuses to start in bfloat16 on such a card at all. Since the vLLM comparison is only
+meaningful if both engines run the same dtype, `inferno/utils.py::select_torch_dtype()` is the
+single source of truth for every model load in the project: float32 on CPU, bfloat16 on Ampere
+and newer, float16 below. The dtype is recorded in each results JSON, and `bench_vllm.py` prints
+an explicit parity line that reads `MISMATCH — numbers not comparable` if the two sides ever
+diverge.
+
+**Why compression is 2× not 4×.** The GPU baseline loads weights in FP16 (2 bytes/element).
 INT8 is 1 byte/element, giving 2×. On CPU the baseline uses FP32 (4 bytes/element), hence the
 4× compression seen in the CPU table below.
 
-**Why throughput drops 23% with INT8 on T4 (30.8 → 23.7 tok/s).** This is the most
-important result in the benchmark. The T4 has 320 GB/s HBM bandwidth and 65 TFLOPS of
-BF16 compute — a memory-bandwidth-to-compute ratio that is moderate rather than extreme.
-More critically, this implementation dequantizes K/V back to BF16 *before* the attention
-matmul, so the attention kernel still runs in BF16. The quantize and dequantize operations
-on every `update()` call add real compute overhead (extra passes over the K/V tensors)
-without reducing the compute cost of attention itself. On T4, that overhead is not covered
-by bandwidth savings from the smaller INT8 storage. A fully fused INT8 attention kernel
+**Why throughput drops ~19% with INT8 on T4 (26.9 → 21.8 tok/s).** This is the most
+important result in the benchmark. The T4 has 320 GB/s HBM bandwidth and a
+memory-bandwidth-to-compute ratio that is moderate rather than extreme. More critically,
+this implementation dequantizes K/V back to FP16 *before* the attention matmul, so the
+attention kernel still runs in FP16. The quantize and dequantize operations on every
+`update()` call add real compute overhead (extra passes over the K/V tensors) without
+reducing the compute cost of attention itself. On T4, that overhead is not covered by
+bandwidth savings from the smaller INT8 storage. A fully fused INT8 attention kernel
 (e.g. FlashAttention INT8 or vLLM's PagedAttention with INT8 KV) would eliminate the
 dequantize overhead and should recover the throughput gap.
 
-**Why peak memory is nearly identical across all three configurations (962 MB).** The
+**Why peak memory is nearly identical across all three configurations (961 MB).** The
 quantized K/V tensors are a small fraction of total GPU memory for a 500M-parameter
-model at 64 decode steps. The bulk of memory is model weights (~950 MB in BF16). The
+model at 64 decode steps. The bulk of memory is model weights (~950 MB in FP16). The
 KV cache for 24 layers × 2 KV heads × 64 tokens × 64 head_dim × 2 bytes ≈ 3 MB —
 halving 3 MB rounds to 0 on the scale of the total memory reading. KV cache memory
 savings become meaningful at long context lengths (4K+ tokens) or larger models.
 
-**Why per-channel beats per-tensor in perplexity on GPU (25.28 vs 26.02, Δ = −0.74).**
+**Why per-channel beats per-tensor in perplexity (25.01 vs 25.51, Δ = −0.50).**
 On CPU with FP32 input, per-channel and per-tensor gave nearly identical perplexity
 because Qwen2.5-0.5B has only 2 GQA KV heads — not enough heads to show the outlier
-effect. On GPU with BF16 input, the smaller numerical range of BF16 (8-bit exponent,
-7-bit mantissa vs FP32's 23-bit mantissa) makes the K/V tensors slightly more sensitive
-to scale choice. The 0.74 PPL improvement from per-channel is real and measurable, even
-with 2 KV heads. The gap would widen substantially on models with 32+ KV heads, where
-outlier heads can dominate the per-tensor scale and corrupt the precision of all other heads.
+effect. On GPU with 16-bit input, the smaller numerical range makes the K/V tensors more
+sensitive to scale choice, and per-channel wins consistently: it did so in the earlier
+bfloat16 run (Δ = −0.74) and again here in float16 (Δ = −0.50). The gap would widen
+substantially on models with 32+ KV heads, where outlier heads can dominate the
+per-tensor scale and corrupt the precision of all other heads.
 
-**TTFT is unaffected by quantization (37.3 ms baseline vs 36.6/37.2 ms quantized).** TTFT
-measures the prefill forward pass, which processes all prompt tokens in one call. No decode
-steps occur during prefill, so no KV cache quantization happens, and TTFT is unchanged.
+**TTFT is essentially unaffected by quantization (36.9 ms baseline vs 38.1/37.7 ms
+quantized).** TTFT measures the prefill forward pass, which processes all prompt tokens in
+one call. No decode steps occur during prefill, so no KV cache quantization happens. The
+~1 ms spread is run-to-run noise on a single measurement, not a quantization cost.
+
+#### Note on the earlier bfloat16 run
+
+An earlier T4 run (`results/bench_gpu_20260703T211036262Z.json`) used bfloat16 on torch
+2.10.0+cu128. It is kept for history but **is not a clean dtype A/B** — the torch and
+transformers versions changed between the two runs as well, so the deltas below cannot be
+attributed to dtype alone:
+
+| Metric                    | bf16 run (2026-07-03) | fp16 run (2026-09-18) |
+|:--------------------------|----------------------:|----------------------:|
+| Baseline tok/s            |                  30.8 |                  26.9 |
+| Baseline PPL              |                 23.70 |                 23.77 |
+| Static batching tok/s     |                  66.4 |                  72.2 |
+| Continuous batching tok/s |                  31.8 |                  28.7 |
+
+Perplexity is effectively unchanged (23.70 → 23.77), which is the useful signal here: FP16's
+narrower dynamic range did not degrade output quality on this model. The throughput deltas move
+in both directions and are confounded, so no dtype conclusion is drawn from them.
 
 ### Continuous Batching — GPU (Tesla T4, Kaggle)
 
-*Source: `results/bench_gpu_20260703T211036262Z.json`*  
+*Source: `results/bench_gpu_20260918T195827668Z.json`*  
 *Workload: 8 requests, mixed token budgets (8–32 tokens each), 120 tokens total (parity-verified).*
 
 | Metric          |  Static | Continuous |
 |:----------------|--------:|-----------:|
-| Tokens/sec      |    66.4 |       31.8 |
-| Mean latency ms |     898 |       1514 |
-| Max latency ms  |    1180 |       2733 |
+| Tokens/sec      |    72.2 |       28.7 |
+| Mean latency ms |     827 |       1657 |
+| p50 latency ms  |     827 |       1168 |
+| p95 latency ms  |    1009 |       2937 |
+| p99 latency ms  |    1009 |       2958 |
+| Max latency ms  |    1009 |       2963 |
 | Total tokens    |     120 |        120 |
 
-**Why static batching wins comprehensively at this concurrency level (66.4 vs 31.8 tok/s,
-2.1× faster; 898 vs 1514 ms mean latency).** This is the expected result from first
-principles, not a failure of the engine.
+**Read the static percentiles with care — that distribution is degenerate.** In static
+batching every sequence in a batch is reported as waiting the full batch duration, and 8
+requests at `max_batch_size=4` is exactly 2 batches. The 8 latency samples therefore take only
+*2 distinct values*, which is why mean = p50 = 827 ms and p95 = p99 = max = 1009 ms. Those are
+batch durations, not a per-request latency spread. The continuous-batching percentiles
+(p50 1168, p95 2937, p99 2958) are a genuine distribution over 8 independently-completing
+requests. Comparing the two percentile columns directly is not meaningful; only the
+continuous column describes real per-request behaviour.
+
+**Why static batching wins on throughput at this concurrency level (72.2 vs 28.7 tok/s,
+2.5× faster).** This is the expected result from first principles, not a failure of the engine.
 
 The engine processes each sequence individually — one forward pass per sequence per decode
 step. With 4 sequences in flight and `max_batch_size=4`, static batching processes all
@@ -116,10 +162,10 @@ The engine makes 4 separate forward passes per decode step, each paying the full
 kernel launch, memory transfer, and scheduling overhead, getting 1/4 the arithmetic
 intensity per step.
 
-On a T4 with 8.1 TFLOPS BF16 peak, a single-token forward pass (one sequence) is so
-small that the GPU spends most of its time on kernel launch and memory setup rather than
-arithmetic. Batching 4 sequences multiplies the arithmetic work without proportionally
-increasing the overhead — this is exactly where static batching wins.
+On a T4, a single-token forward pass (one sequence) is so small that the GPU spends most of
+its time on kernel launch and memory setup rather than arithmetic. Batching 4 sequences
+multiplies the arithmetic work without proportionally increasing the overhead — this is
+exactly where static batching wins.
 
 **Why continuous batching's advantage appears at high concurrency, not low.** With 8
 requests and a max batch of 4, the scheduler runs at near-100% utilization. The benefit
@@ -156,8 +202,9 @@ in that overhead, so throughput neither improves nor meaningfully degrades.
 **Why per-channel perplexity is worse than per-tensor on CPU (+3.59 vs +2.09).** With
 only 2 GQA KV heads on CPU with FP32 input, both methods produce nearly identical
 quantization error. The ~1.5 PPL difference is in the noise of the single-pass perplexity
-evaluation method used (not autoregressive scoring). On GPU with BF16 input, per-channel
-correctly shows a lower perplexity delta than per-tensor (see above).
+evaluation method used (not autoregressive scoring). On GPU with 16-bit input, per-channel
+correctly shows a lower perplexity delta than per-tensor — in both the FP16 and the earlier
+BF16 run (see above).
 
 ### Continuous Batching — CPU (Qwen2.5-0.5B)
 
@@ -254,15 +301,15 @@ most short-to-medium prompts prefill in a single step.
 ## Limitations & Future Work
 
 **Dequantize-before-attention eliminates the throughput benefit on T4.** The current
-implementation stores K/V as INT8 but dequantizes to BF16 before the attention matmul.
-This is correct and simple, but it means the attention kernel runs in BF16 and pays an
+implementation stores K/V as INT8 but dequantizes to FP16 before the attention matmul.
+This is correct and simple, but it means the attention kernel runs in FP16 and pays an
 extra quantize+dequantize round-trip on every decode step. On T4, this overhead outweighs
-the bandwidth savings from smaller KV storage (30.8 → 23.7 tok/s, −23%). A fused INT8
+the bandwidth savings from smaller KV storage (26.9 → 21.8 tok/s, −19%). A fused INT8
 attention kernel would eliminate the overhead. On A100/H100 with higher HBM bandwidth,
 the bandwidth savings are larger and may tip the balance.
 
 **Per-channel benefit requires more KV heads.** On Qwen2.5-0.5B with 2 GQA KV heads the
-improvement is small (0.74 PPL on GPU). On a model with 32 KV heads (e.g. Llama-3-8B),
+improvement is small (0.50 PPL on GPU in FP16; 0.74 in the earlier BF16 run). On a model with 32 KV heads (e.g. Llama-3-8B),
 outlier heads are much more likely to dominate the per-tensor scale and corrupt precision
 for other heads. Per-channel is the correct default for production; this model is just too
 small to stress-test it.
@@ -273,6 +320,17 @@ multiple sequences into a single forward pass via FlashAttention's variable-leng
 eliminating per-sequence overhead and recovering throughput. At low concurrency (< 20
 requests), scheduling overhead dominates regardless — the benefit only materialises at
 high sustained load.
+
+**Speculative decoding is below break-even at the configured gamma.** The measured 0.70×
+is explained by the acceptance rate (0.547) and γ = 4 together putting the idealised ceiling
+at 0.92× — see the speculative section. γ = 1–2 and a smaller draft model are the fixes; a
+gamma sweep has not been run.
+
+**The vLLM throughput comparison is not like-for-like.** vLLM is measured with all 10 prompts
+submitted at once; the Inferno figure it is placed beside is the sequential `BATCH_SIZE = 1`
+baseline. The ratio therefore mixes batching effects with kernel-fusion effects and should not
+be read as a pure engine-vs-engine number. A matched-concurrency harness is needed to separate
+them.
 
 **No PagedAttention.** This implementation allocates a contiguous INT8 buffer per sequence
 per layer, re-allocating on every `update()` call. At hundreds of concurrent sequences with
@@ -294,7 +352,7 @@ pip install -r requirements.txt
 ### CPU
 
 ```bash
-pytest tests/ -v                    # 46 tests, ~25 s, no GPU required
+pytest tests/ -v                    # 51 tests, ~30 s, no GPU required
 python benchmarks/bench_cache.py    # Baseline | Per-Tensor | Per-Channel
 python benchmarks/bench_batching.py # Static vs Continuous, parity-checked
 ```
@@ -310,7 +368,8 @@ python benchmarks/bench_gpu.py     # full GPU suite; saves to results/bench_gpu_
 
 ## Test Coverage
 
-**46 / 46 tests passing.** All tests run on CPU — no GPU required.
+**51 / 51 tests passing.** All tests run on CPU — no GPU required, and the suite is
+verified against both transformers 4.57.6 and 5.17.x.
 
 | Suite | Tests | What it checks |
 |:------|------:|:---------------|
@@ -322,9 +381,9 @@ python benchmarks/bench_gpu.py     # full GPU suite; saves to results/bench_gpu_
 tests/test_baseline.py    9 passed
 tests/test_cache.py      28 passed
 tests/test_engine.py      9 passed
-tests/test_speculative.py 4 passed
+tests/test_speculative.py 5 passed
 ──────────────────────────────────
-50 passed in ~30 s  (CPU, Qwen2.5-0.5B; speculative tests use mocked models)
+51 passed in ~30 s  (CPU, Qwen2.5-0.5B; speculative tests use mocked models)
 ```
 
 ---
@@ -369,6 +428,51 @@ A rate of 1.0 means the draft always predicts what the target would have chosen
 token is rejected (pure overhead; speedup drops below 1×). Expected rate on Qwen pairs
 depends on how well the 0.5B distribution approximates the 1.5B distribution.
 
+### Measured results — Tesla T4
+
+*Source: `results/bench_speculative_20260918T195638233Z.json`*  
+*Draft `Qwen2.5-0.5B-Instruct` (494M) · target `Qwen2.5-1.5B-Instruct` (1543M) · gamma = 4 · float16 · 10 prompts × 64 tokens.*
+
+| Metric          | Autoregressive | Speculative (γ=4) |
+|:----------------|---------------:|------------------:|
+| Tokens/sec      |           23.2 |              16.4 |
+| Mean latency ms |           2754 |              3906 |
+| Acceptance rate |              — |             0.547 |
+| Total tokens    |            640 |               640 |
+
+**Speculative decoding is 0.70× — a slowdown, and the arithmetic says it should be.**
+This is a real negative result, not a bug. With per-token acceptance α = 0.547 and γ = 4,
+the expected number of tokens produced per speculative iteration is
+
+```
+E[tokens/iter] = (1 − α^(γ+1)) / (1 − α) = (1 − 0.547^5) / 0.453 ≈ 2.10
+```
+
+Each iteration costs 4 draft forward passes plus 1 target forward pass. Scaling the draft
+cost by the parameter ratio (494M / 1543M ≈ 0.32) gives ≈ 4(0.32) + 1 = 2.28 target-equivalent
+passes for those 2.10 tokens — about 1.09 target passes per token, versus exactly 1.0 for
+plain autoregressive decoding. **The idealised ceiling at this acceptance rate is ≈ 0.92× —
+below break-even before any framework overhead is counted.** Measured 0.70× is that ceiling
+plus Python dispatch and kernel-launch cost.
+
+The error is the choice of γ, not the implementation. Running the same arithmetic across γ:
+
+| γ | E[tokens/iter] | Target-equiv. cost | Idealised speedup |
+|--:|---------------:|-------------------:|------------------:|
+| 1 |           1.55 |               1.32 |            1.17×  |
+| 2 |           1.85 |               1.64 |            1.13×  |
+| 4 |           2.10 |               2.28 |            0.92×  |
+
+γ = 4 only pays off at substantially higher acceptance. A 0.5B/1.5B Qwen pair accepting ~55%
+of draft tokens wants γ = 1–2. `GAMMA` is a named constant at the top of
+`benchmarks/bench_speculative.py`; re-running the sweep is the obvious next experiment.
+
+Note also that the draft and target are only 3.1× apart in parameter count. Speculative
+decoding assumes the draft is *much* cheaper than the target — production pairs are typically
+10–20× apart (e.g. 7B drafting for 70B). At 3.1×, the draft's four sequential passes cost a
+third of the target pass they are trying to save, which caps the achievable speedup regardless
+of γ. A smaller draft model would move this result more than any amount of tuning.
+
 ### How to run
 
 ```bash
@@ -395,6 +499,47 @@ in this project are working toward:
   Inferno's engine runs one pass per sequence. The throughput ratio quantifies that gap.
 - **PagedAttention** — vLLM avoids KV cache memory fragmentation at scale; Inferno allocates
   contiguous buffers per sequence.
+
+### Measured results — Tesla T4
+
+*Source: `results/bench_vllm_20260918T200014463Z.json`, vLLM 0.29.0, float16 (parity-checked against the Inferno run).*
+
+| Metric         |   vLLM | Inferno | 
+|:---------------|-------:|--------:|
+| Tokens/sec     | 1453.8 |    26.9 |
+| p50 latency ms |    364 |     827 |
+| p95 latency ms |    756 |    1009 |
+| p99 latency ms |   1012 |    1009 |
+
+**The 54× throughput ratio is not a like-for-like engine comparison, and should not be
+quoted as one.** The two numbers measure different workloads:
+
+- **vLLM 1453.8 tok/s** — all 10 prompts submitted in a single `generate()` call, so vLLM's
+  scheduler batches them internally and runs them through fused kernels concurrently.
+- **Inferno 26.9 tok/s** — the Part A cache baseline, which is strictly sequential:
+  `BATCH_SIZE = 1`, one prompt at a time, one HuggingFace `generate()` call each.
+
+Most of that gap is batching, not kernel quality. The fairer comparison against Inferno's
+own best batched result — **72.2 tok/s** from static batching at 4 requests/batch — is
+roughly **20×**, still a large and real gap, and still measured at a lower batch size than
+vLLM was given. The honest summary is: vLLM is at least an order of magnitude faster here,
+and this benchmark does not isolate how much of that is PagedAttention vs. fused kernels vs.
+simply batching more requests.
+
+**The p99 "win" for Inferno (1009 vs 1012 ms) is an artifact, not an advantage.** Inferno's
+latency samples come from static batching, where only 2 distinct values exist across 8
+requests (see the batching section above), so its p95 and p99 both collapse onto the max.
+There is no tail-latency story to tell from these numbers.
+
+**vLLM was itself handicapped on this hardware.** The logs show FlashAttention 2 unavailable
+(`FA2 is only supported on devices with compute capability >= 8`), so vLLM fell back to its
+Triton attention backend, and FlashInfer top-p/top-k sampling was unavailable for the same
+reason. On an Ampere or newer card the gap would likely be *wider*, not narrower.
+
+**Startup cost is excluded from the throughput figure.** vLLM spent ≈ 42 s initialising the
+engine (15.9 s of `torch.compile`, plus CUDA graph capture) before serving a single token.
+For a long-running server that amortises to nothing; for a short batch job it is the dominant
+cost. Inferno has no comparable warm-up.
 
 ### How to run
 
